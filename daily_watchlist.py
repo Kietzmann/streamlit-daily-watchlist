@@ -42,7 +42,7 @@ logger.info("Watchlist main logger initialized.")
 # Configure Streamlit page (handle potential rerun error)
 try:
     st.set_page_config(
-        page_title="Kraken USDT Dashboard - Short Term", page_icon="⏱️", layout="wide", initial_sidebar_state="expanded"
+        page_title="USDT Dashboard - Short Term", page_icon="⏱️", layout="wide", initial_sidebar_state="expanded"
     )
     logger.info("Streamlit page configured.")
 except st.errors.StreamlitAPIException as e:
@@ -81,10 +81,10 @@ CLIP_UPPER = 100
 # --- Supported Exchanges ---
 SUPPORTED_EXCHANGES = {
     "kraken": "Kraken",
-    "okx": "OKX",
+    # "okx": "OKX", # fix issue with too many requests
     "binance": "Binance",
     "bybit": "Bybit",
-    "coinbase": "Coinbase"
+    # "coinbase": "Coinbase" # stablecoin filtering need to be fixed
 }
 
 # --- Indicator Weights ---
@@ -156,9 +156,9 @@ STABLECOINS = {  # Keep this list relevant
 VOLUME_ALPHA = 0.2  # Smoothing factor for volume delta
 # DEFAULT_NUM_CORES = 8  # Adjust based on your system
 CPU_COUNT = multiprocessing.cpu_count()
-DEFAULT_NUM_THREADS = min(32, CPU_COUNT * 4)
+# DEFAULT_NUM_THREADS = min(32, CPU_COUNT * 4)
+DEFAULT_NUM_THREADS = CPU_COUNT
 # DEFAULT_NUM_THREADS = 8
-EXCHANGE_ID = "kraken"
 CCXT_TIMEOUT = 30000  # 30 seconds for CCXT requests
 
 
@@ -725,35 +725,10 @@ def create_table(tickers, base_rank_field, base_rank_label):
     if not tickers:
         logger.warning("create_table: Received empty ticker list.")
         return pd.DataFrame()
-    # data = {
-    #     "Symbol": [t.get("symbol", "N/A") for t in tickers],
-    #     "Price": [round(float(price), 4) if (price := t.get("price")) is not None else None for t in tickers],
-    #     "Score": [round(float(score), 2) if (score := t.get("score")) is not None else None for t in tickers],
-    #     base_rank_label: [
-    #         round(float(base_rank), 2) if (base_rank := t.get(base_rank_field)) is not None else None for t in tickers
-    #     ],
-    #     "1m %": [round(float(ch1m), 2) if (ch1m := t.get("change_1m")) is not None else None for t in tickers],
-    #     "5m %": [round(float(ch5m), 2) if (ch5m := t.get("change_5m")) is not None else None for t in tickers],
-    #     "15m %": [round(float(ch15m), 2) if (ch15m := t.get("change_15m")) is not None else None for t in tickers],
-    #     f"Brkout ({BREAKOUT_LOOKBACK}p)": [
-    #         round(float(brk), 2) if (brk := t.get("breakout_15m")) is not None else None for t in tickers
-    #     ],
-    #     f"MR Wings ({MR_LFAST})": [
-    #         round(float(wings), 2) if (wings := t.get("mr_wings_15m")) is not None else None for t in tickers
-    #     ],
-    #     "Vol (5m)%": [
-    #         round(float(vol5m), 2) if (vol5m := t.get("volatility_5m")) is not None else None for t in tickers
-    #     ],
-    #     "Quote Vol (24h)": [
-    #         round(float(qvol), 0) if (qvol := t.get("quoteVolume")) is not None else None for t in tickers
-    #     ],
-    #     "Vol Delta (Smooth)": [
-    #         round(float(vd), 2) if (vd := t.get("vol_delta")) is not None else None for t in tickers
-    #     ],
-    # }
 
     data = {
         "Symbol": [t.get("symbol", "N/A") for t in tickers],
+        "Exchange": [t.get("exchange", "N/A") for t in tickers],  # Add exchange column
         "Price": [price if (price := t.get("price")) is not None else None for t in tickers],
         "Score": [score if (score := t.get("score")) is not None else None for t in tickers],
         base_rank_label: [
@@ -795,12 +770,11 @@ def create_table(tickers, base_rank_field, base_rank_label):
 # =============================================================================
 # Async Data Fetching Orchestration (Keep as is - calls worker correctly)
 # =============================================================================
-async def fetch_tickers_usdt(exchange):
-    """Fetches and filters tickers for USDT quote from the specified exchange."""
-    # (Function definition remains the same as provided in your code)
-    logger.info(f"Fetching USDT tickers from {exchange.id}...")
+async def fetch_tickers_stablecoins(exchange, selected_stablecoins):
+    """Fetches and filters tickers for selected stablecoin quotes from the specified exchange."""
+    logger.info(f"Fetching {', '.join(selected_stablecoins)} tickers from {exchange.id}...")
     min_quote_vol = 10000
-    tickers_usdt = {}
+    tickers_stablecoins = {}
     try:
         all_tickers = await exchange.fetch_tickers()
         logger.info(f"Fetched {len(all_tickers)} tickers initially from {exchange.id}.")
@@ -816,14 +790,18 @@ async def fetch_tickers_usdt(exchange):
         logger.error(f"fetch_tickers failed: Unexpected error. {e}", exc_info=True)
         st.error(f"Unexpected error fetching tickers: {e}")
         return {}
+
     excluded = {"stable": 0, "quote": 0, "lowvol": 0, "invalid": 0}
     if not all_tickers:
         logger.warning("fetch_tickers returned no data.")
         return {}
+    logger.info(f"Quotes: {all_tickers.keys()}")
+    
     for symbol, ticker in all_tickers.items():
         if not symbol or "/" not in symbol or not ticker or not isinstance(ticker, dict):
             excluded["invalid"] += 1
             continue
+
         last_price = ticker.get("last")
         quote_volume = ticker.get("quoteVolume")
         if last_price is None or last_price <= 0:
@@ -831,11 +809,18 @@ async def fetch_tickers_usdt(exchange):
             continue
         if quote_volume is None:
             quote_volume = 0.0
+
         try:
-            base, quote = symbol.split("/")
+            # Handle Bybit's special symbol format (e.g., 'BTC/USDT:USDT')
+            if exchange.id == "bybit" and ":" in symbol:
+                temp_symbol, stablecoin = symbol.split(":")
+                base, quote = temp_symbol.split("/")
+            else:
+                base, quote = symbol.split("/")
         except ValueError:
             excluded["invalid"] += 1
             continue
+
         if quote.upper() in ["USDT", "USD"]:
             if base.upper() in STABLECOINS:
                 excluded["stable"] += 1
@@ -847,13 +832,15 @@ async def fetch_tickers_usdt(exchange):
             except (ValueError, TypeError):
                 excluded["invalid"] += 1
                 continue
-            tickers_usdt[symbol] = ticker
+            tickers_stablecoins[symbol] = ticker
         else:
             excluded["quote"] += 1
+
     logger.info(
-        f"Filtered to {len(tickers_usdt)} USDT/USD tickers (MinVol:${min_quote_vol:,.0f}). Excluded: {excluded['stable']} stable, {excluded['quote']} quote, {excluded['lowvol']} lowvol, {excluded['invalid']} invalid."
+        f"Filtered to {len(tickers_stablecoins)} {', '.join(selected_stablecoins)} tickers (MinVol:${min_quote_vol:,.0f}). "
+        f"Excluded: {excluded['stable']} stable, {excluded['quote']} quote, {excluded['lowvol']} lowvol, {excluded['invalid']} invalid."
     )
-    return tickers_usdt
+    return tickers_stablecoins
 
 
 def fetch_and_process_data_parallel(exchange_id, symbols, ccxt_timeout, num_threads):
@@ -895,13 +882,17 @@ def fetch_and_process_data_parallel(exchange_id, symbols, ccxt_timeout, num_thre
             try:
                 chunk_results = future.result()
                 if isinstance(chunk_results, list):
+                    # Add exchange_id to each result
+                    for result in chunk_results:
+                        if isinstance(result, dict):
+                            result["exchange_id"] = exchange_id
                     all_results.extend(chunk_results)
                 else:
                     logger.error(f"Worker returned unexpected type: {type(chunk_results)} for chunk {chunk[:3]}...")
-                    all_results.extend([{"symbol": s, "error": f"Worker invalid type: {type(chunk_results)}"} for s in chunk])
+                    all_results.extend([{"symbol": s, "error": f"Worker invalid type: {type(chunk_results)}", "exchange_id": exchange_id} for s in chunk])
             except Exception as e:
                 logger.error(f"Worker future raised exception for chunk {chunk[:3]}...: {e}", exc_info=True)
-                all_results.extend([{"symbol": s, "error": f"Future Exec Error: {e}"} for s in chunk])
+                all_results.extend([{"symbol": s, "error": f"Future Exec Error: {e}", "exchange_id": exchange_id} for s in chunk])
     logger.info(f"Collected {len(all_results)} total entries from workers.")
     successful_count = sum(1 for res in all_results if isinstance(res, dict) and "symbol" in res and not res.get("error"))
     error_count = len(all_results) - successful_count
@@ -922,6 +913,8 @@ def process_ticker_data(symbol, ticker_data, worker_results_map):
     logger.debug(f"Processing ticker data for {symbol}...")
     ticker = copy.deepcopy(ticker_data)  # Start fresh
     ticker["symbol"] = symbol
+    # Add exchange information
+    ticker["exchange"] = SUPPORTED_EXCHANGES.get(ticker.get("exchange_id", "kraken"), "Unknown")
     # Ensure basic fields are floats
     ticker["last"] = float(ticker.get("last", 0.0) or 0.0)
     ticker["quoteVolume"] = float(ticker.get("quoteVolume", 0.0) or 0.0)
@@ -1111,7 +1104,7 @@ async def async_dashboard_main(selected_exchanges, num_cores):
 
                 # --- 2. Fetch Filtered Tickers ---
                 status_text.info(f"Fetching and filtering USDT/USD tickers from {SUPPORTED_EXCHANGES[exchange_id]}...")
-                tickers_dict = await fetch_tickers_usdt(exchange)
+                tickers_dict = await fetch_tickers_stablecoins(exchange, STABLECOINS)
                 if not tickers_dict:
                     status_text.error(f"❌ No valid USDT/USD tickers found on {SUPPORTED_EXCHANGES[exchange_id]} matching criteria.")
                     if exchange:
@@ -1285,11 +1278,15 @@ def run_async_dashboard(selected_exchanges):
 st.sidebar.markdown("---")
 st.sidebar.header("Dashboard Controls")
 
-# Initialize session state for tracking calculations
+# Initialize session state for tracking calculations and refresh
 if "calculations_running" not in st.session_state:
     st.session_state.calculations_running = False
 if "last_selected_exchanges" not in st.session_state:
     st.session_state.last_selected_exchanges = []
+if "last_refresh_time" not in st.session_state:
+    st.session_state.last_refresh_time = None
+if "auto_refresh" not in st.session_state:
+    st.session_state.auto_refresh = False
 
 # Add exchange selection
 selected_exchanges = st.sidebar.multiselect(
@@ -1299,6 +1296,21 @@ selected_exchanges = st.sidebar.multiselect(
     default=["kraken"],
     help="Select one or more exchanges to fetch data from"
 )
+
+# Add refresh time selection
+st.sidebar.markdown("---")
+st.sidebar.subheader("Auto-Refresh Settings")
+refresh_enabled = st.sidebar.checkbox("Enable Auto-Refresh", value=False, help="Automatically refresh the dashboard at specified intervals")
+if refresh_enabled:
+    refresh_interval = st.sidebar.number_input(
+        "Refresh Interval (minutes)",
+        min_value=1,
+        max_value=60,
+        value=1,
+        step=1,
+        help="Set the refresh interval in minute (minimum 1 minute)"
+    )
+    st.sidebar.info(f"Dashboard will refresh every {refresh_interval} minute(s)")
 
 # Check if exchanges have changed
 if selected_exchanges != st.session_state.last_selected_exchanges:
@@ -1314,10 +1326,25 @@ if st.sidebar.button("🚀 Start Calculations", key="start_calculations_button",
     st.sidebar.info("Starting calculations...")
     logger.info(f"Start calculations button clicked for exchanges: {selected_exchanges}")
     st.session_state.calculations_running = True
+    st.session_state.last_refresh_time = time.time()
+    st.session_state.auto_refresh = refresh_enabled
     st.session_state.pop("last_volume_dict", None)
     st.session_state.pop("avg_vol_delta_dict", None)
     logger.info("Cleared volume tracking state for refresh.")
     run_async_dashboard(selected_exchanges)
+
+# Handle auto-refresh
+if st.session_state.auto_refresh and st.session_state.calculations_running:
+    current_time = time.time()
+    if st.session_state.last_refresh_time is not None:
+        time_since_last_refresh = current_time - st.session_state.last_refresh_time
+        if time_since_last_refresh >= refresh_interval * 60:
+            logger.info(f"Auto-refresh triggered after {time_since_last_refresh:.1f} seconds")
+            st.session_state.last_refresh_time = current_time
+            st.session_state.pop("last_volume_dict", None)
+            st.session_state.pop("avg_vol_delta_dict", None)
+            run_async_dashboard(selected_exchanges)
+            st.rerun()
 
 # =============================================================================
 # Script Entry Point Guard
