@@ -78,6 +78,15 @@ except ImportError as e:
 CLIP_LOWER = -100
 CLIP_UPPER = 100
 
+# --- Supported Exchanges ---
+SUPPORTED_EXCHANGES = {
+    "kraken": "Kraken",
+    "okx": "OKX",
+    "binance": "Binance",
+    "bybit": "Bybit",
+    "coinbase": "Coinbase"
+}
+
 # --- Indicator Weights ---
 CHANGE_1M_WEIGHT = 0.15
 CHANGE_5M_WEIGHT = 0.30
@@ -294,14 +303,14 @@ def breakout(price, lookback_periods=10, smooth_periods=None):
 #         st.error(f"Error loading credentials: {e}")
 #         logger.error(f"Error loading credentials: {e}", exc_info=True)
 #         return {}
-
-
+#
+#
 # credentials = load_credentials()
 # if "authenticated" not in st.session_state:
 #     st.session_state["authenticated"] = False
 # if "username" not in st.session_state:
 #     st.session_state["username"] = None
-
+#
 # if not st.session_state.get("authenticated", False):
 #     st.sidebar.title("Login")
 #     username_input = st.sidebar.text_input("Username", key="login_username_input")
@@ -1072,151 +1081,115 @@ def process_ticker_data(symbol, ticker_data, worker_results_map):
 # =============================================================================
 # Main Asynchronous Orchestration Function
 # =============================================================================
-async def async_dashboard_main(num_cores):
-    """Main async function for the SHORT-TERM focused Kraken USDT dashboard."""
+async def async_dashboard_main(selected_exchanges, num_cores):
+    """Main async function for the SHORT-TERM focused dashboard with multiple exchanges."""
     global dashboard_placeholder
-    exchange_id = EXCHANGE_ID
-    exchange = None
     start_run_time = time.time()
+    all_results = []
 
     with dashboard_placeholder.container():
-        st.info(f"🚀 Initializing {exchange_id.capitalize()} & fetching data (Short-Term Focus)...")
+        st.info(f"🚀 Initializing exchanges & fetching data (Short-Term Focus)...")
         st.markdown("---")
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        try:
-            # --- 1. Initialize Exchange ---
-            status_text.info(f"Connecting to {exchange_id.capitalize()}...")
+        for exchange_id in selected_exchanges:
+            exchange = None
             try:
-                exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": CCXT_TIMEOUT})
-                logger.info(f"Initialized {exchange_id.capitalize()} exchange instance.")
-                progress_bar.progress(5)
-            except (ccxt.AuthenticationError, ccxt.ExchangeError, Exception) as e:
-                logger.error(f"Fatal: Failed to initialize {exchange_id.capitalize()} exchange: {e}", exc_info=True)
-                status_text.error(f"❌ Failed to connect to {exchange_id.capitalize()}: {e}")
-                if exchange:
-                    await exchange.close()
-                return
+                # --- 1. Initialize Exchange ---
+                status_text.info(f"Connecting to {SUPPORTED_EXCHANGES[exchange_id]}...")
+                try:
+                    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": CCXT_TIMEOUT})
+                    logger.info(f"Initialized {SUPPORTED_EXCHANGES[exchange_id]} exchange instance.")
+                    progress_bar.progress(5)
+                except (ccxt.AuthenticationError, ccxt.ExchangeError, Exception) as e:
+                    logger.error(f"Fatal: Failed to initialize {SUPPORTED_EXCHANGES[exchange_id]} exchange: {e}", exc_info=True)
+                    status_text.error(f"❌ Failed to connect to {SUPPORTED_EXCHANGES[exchange_id]}: {e}")
+                    if exchange:
+                        await exchange.close()
+                    continue
 
-            # --- 2. Fetch Filtered Tickers ---
-            status_text.info("Fetching and filtering USDT/USD tickers...")
-            tickers_dict = await fetch_tickers_usdt(exchange)
-            if not tickers_dict:
-                status_text.error(f"❌ No valid USDT/USD tickers found on {exchange_id.capitalize()} matching criteria.")
-                if exchange:
-                    await exchange.close()
-                return
-            symbols = list(tickers_dict.keys())
-            status_text.info(f"✅ Found {len(symbols)} USDT/USD symbols matching criteria.")
-            progress_bar.progress(10)
+                # --- 2. Fetch Filtered Tickers ---
+                status_text.info(f"Fetching and filtering USDT/USD tickers from {SUPPORTED_EXCHANGES[exchange_id]}...")
+                tickers_dict = await fetch_tickers_usdt(exchange)
+                if not tickers_dict:
+                    status_text.error(f"❌ No valid USDT/USD tickers found on {SUPPORTED_EXCHANGES[exchange_id]} matching criteria.")
+                    if exchange:
+                        await exchange.close()
+                    continue
+                symbols = list(tickers_dict.keys())
+                status_text.info(f"✅ Found {len(symbols)} USDT/USD symbols matching criteria on {SUPPORTED_EXCHANGES[exchange_id]}.")
+                progress_bar.progress(10)
 
-            # --- 3. Fetch OHLCV in Parallel (Workers) ---
-            status_text.info(f"Fetching short-term OHLCV ({len(symbols)} symbols, {num_cores} cores)...")
-            ohlcv_fetch_start = time.time()
-            # This function correctly calls the worker with placeholder args
-            worker_results = fetch_and_process_data_parallel(exchange_id, symbols, CCXT_TIMEOUT, num_cores)
-            logger.info(f"Parallel SHORT TF OHLCV fetch complete ({time.time() - ohlcv_fetch_start:.2f}s).")
-            progress_bar.progress(40)
-            worker_results_map = {res["symbol"]: res for res in worker_results if isinstance(res, dict) and "symbol" in res}
-            successful_worker_count = sum(
-                1 for res in worker_results if isinstance(res, dict) and "symbol" in res and not res.get("error")
-            )
-            total_worker_results = len(worker_results)
-            failed_worker_count = total_worker_results - successful_worker_count
+                # --- 3. Fetch OHLCV in Parallel (Workers) ---
+                status_text.info(f"Fetching short-term OHLCV from {SUPPORTED_EXCHANGES[exchange_id]} ({len(symbols)} symbols, {num_cores} cores)...")
+                ohlcv_fetch_start = time.time()
+                worker_results = fetch_and_process_data_parallel(exchange_id, symbols, CCXT_TIMEOUT, num_cores)
+                logger.info(f"Parallel SHORT TF OHLCV fetch complete for {SUPPORTED_EXCHANGES[exchange_id]} ({time.time() - ohlcv_fetch_start:.2f}s).")
+                progress_bar.progress(40)
+                worker_results_map = {res["symbol"]: res for res in worker_results if isinstance(res, dict) and "symbol" in res}
+                successful_worker_count = sum(
+                    1 for res in worker_results if isinstance(res, dict) and "symbol" in res and not res.get("error")
+                )
+                total_worker_results = len(worker_results)
+                failed_worker_count = total_worker_results - successful_worker_count
 
-            # Handle complete fetch failure
-            if successful_worker_count == 0 and total_worker_results > 0:
-                msg = f"❌ **Critical:** Failed to fetch OHLCV data for *any* symbol ({failed_worker_count}/{total_worker_results} failures)."
-                logger.error(msg + " Check worker logs for details.")
-                status_text.error(msg + " Displaying only basic ticker info.")
-                # ... (Code to display basic info remains the same) ...
-                error_reasons = [
-                    res.get("error", "Unknown Error") for res in worker_results if isinstance(res, dict) and res.get("error")
-                ]
-                st.subheader("OHLCV Fetch Failed - Sample Reasons:")
-                st.json(dict(pd.Series(error_reasons).value_counts().head(5)), expanded=False)
-                status_text.info("Processing basic ticker info...")
-                tickers_list_basic = []
+                # Handle complete fetch failure
+                if successful_worker_count == 0 and total_worker_results > 0:
+                    msg = f"❌ **Critical:** Failed to fetch OHLCV data for *any* symbol on {SUPPORTED_EXCHANGES[exchange_id]} ({failed_worker_count}/{total_worker_results} failures)."
+                    logger.error(msg + " Check worker logs for details.")
+                    status_text.error(msg + " Displaying only basic ticker info.")
+                    continue
+
+                # Warn about partial failures
+                elif failed_worker_count > 0:
+                    warn_msg = f"⚠️ Fetched OHLCV successfully for {successful_worker_count}/{len(symbols)} symbols on {SUPPORTED_EXCHANGES[exchange_id]} ({failed_worker_count} failures). Analysis proceeding."
+                    logger.warning(warn_msg)
+                    status_text.warning(warn_msg)
+
+                # --- 4. Process Ticker Data ---
+                status_text.info(f"Processing data & calculating indicators for {SUPPORTED_EXCHANGES[exchange_id]}...")
+                processing_start = time.time()
+                tickers_list = []
+                total_symbols_to_process = len(tickers_dict)
+                processed_count = 0
+                error_processing_count = 0
+
                 for i, (symbol, ticker_data) in enumerate(tickers_dict.items()):
                     try:
                         processed_ticker = process_ticker_data(symbol, ticker_data, worker_results_map)
-                        tickers_list_basic.append(processed_ticker)  # Still process to get errors
+                        # Add exchange info to the ticker
+                        processed_ticker["exchange"] = SUPPORTED_EXCHANGES[exchange_id]
+                        tickers_list.append(processed_ticker)
+                        if processed_ticker.get("fetch_error"):
+                            error_processing_count += 1
+                        else:
+                            processed_count += 1
                     except Exception as e:
-                        logger.error(f"Error during basic processing for {symbol}: {e}", exc_info=True)
-                progress_bar.progress(100)
-                st.subheader(f"Basic Ticker Data ({exchange_id.capitalize()}) - Analysis Unavailable")
-                basic_data_display = [
-                    {
-                        "Symbol": t.get("symbol"),
-                        "Price": f"{t.get('last'):.4f}" if t.get("last") else "N/A",
-                        "Volume (Quote)": f"${t.get('quoteVolume'):,.0f}" if t.get("quoteVolume") else "N/A",
-                        "% Change (API)": f"{t.get('percentage_api'):.2f}%" if t.get("percentage_api") else "N/A",
-                        "Fetch Error": t.get("fetch_error", "OK/None"),
-                    }
-                    for t in tickers_list_basic
-                ]
-                if basic_data_display:
-                    basic_df = pd.DataFrame(basic_data_display).sort_values(by="Symbol")
-                    basic_df.index = np.arange(1, len(basic_df) + 1)
-                    st.dataframe(basic_df, use_container_width=True)
-                else:
-                    st.warning("No basic ticker data could be processed.")
-                logger.warning("Halting analysis due to complete OHLCV fetch failure.")
-                execution_time = time.time() - start_run_time
-                st.caption(f"Basic data only. Total time: {execution_time:.2f}s")
-                if exchange:
-                    await exchange.close()
-                    logger.info("Closed exchange connection (early exit).")
-                return
-            # Warn about partial failures
-            elif failed_worker_count > 0:
-                warn_msg = f"⚠️ Fetched OHLCV successfully for {successful_worker_count}/{len(symbols)} symbols ({failed_worker_count} failures). Analysis proceeding."
-                logger.warning(warn_msg)
-                status_text.warning(warn_msg)
-
-            # --- 4. Process Ticker Data (Main Process - Includes Indicator Calcs) ---
-            status_text.info("Processing data & calculating indicators (Breakout, MR Wings)...")  # Update text
-            processing_start = time.time()
-            tickers_list = []
-            total_symbols_to_process = len(tickers_dict)
-            processed_count = 0
-            error_processing_count = 0
-
-            for i, (symbol, ticker_data) in enumerate(tickers_dict.items()):
-                try:
-                    # Calls process_ticker_data which now handles breakout and MR wings (with approx vol)
-                    processed_ticker = process_ticker_data(symbol, ticker_data, worker_results_map)
-                    tickers_list.append(processed_ticker)
-                    if processed_ticker.get("fetch_error"):
+                        logger.error(f"Error processing data for {symbol} in main loop: {e}", exc_info=True)
                         error_processing_count += 1
-                    else:
-                        processed_count += 1
-                except Exception as e:
-                    logger.error(f"Error processing data for {symbol} in main loop: {e}", exc_info=True)
-                    error_processing_count += 1
-                progress_bar.progress(40 + int((i + 1) / total_symbols_to_process * 30))
+                    progress_bar.progress(40 + int((i + 1) / total_symbols_to_process * 30))
 
-            # --- (Previous code: loop processing tickers) ---
-            logger.info(
-                f"Processed {processed_count} symbols successfully, {error_processing_count} with errors/missing data ({time.time() - processing_start:.2f}s)."
-            )
+                logger.info(
+                    f"Processed {processed_count} symbols successfully on {SUPPORTED_EXCHANGES[exchange_id]}, {error_processing_count} with errors/missing data ({time.time() - processing_start:.2f}s)."
+                )
 
-            # --- Check if any tickers remain after processing ---
-            if not tickers_list:
-                # This block executes if the list is empty
-                status_text.error("❌ No tickers available for analysis after processing.")
-                logger.error("No tickers available for analysis after processing step.")  # Add log
+                # Add processed tickers to all results
+                all_results.extend(tickers_list)
+
+            except Exception as e:
+                logger.error(f"Error processing {SUPPORTED_EXCHANGES[exchange_id]}: {e}", exc_info=True)
+                status_text.error(f"❌ Error processing {SUPPORTED_EXCHANGES[exchange_id]}: {e}")
+            finally:
                 if exchange:
-                    # Close exchange connection since we are exiting
                     try:
                         await exchange.close()
-                        logger.info("Closed exchange connection (no tickers processed).")
-                    except Exception as close_err:
-                        logger.error(f"Error closing exchange after processing failure: {close_err}")
-                return  # Exit the async_dashboard_main function
+                        logger.info(f"Closed {SUPPORTED_EXCHANGES[exchange_id]} exchange connection.")
+                    except Exception as e:
+                        logger.error(f"Error closing {SUPPORTED_EXCHANGES[exchange_id]} connection: {e}")
 
-            # --- If tickers_list is NOT empty, execution continues here ---
+        # --- Process all results together ---
+        if all_results:
             # --- 5. Calculate Volume Delta ---
             status_text.info("Processing volume delta...")
             progress_bar.progress(75)
@@ -1226,24 +1199,24 @@ async def async_dashboard_main(num_cores):
             if "avg_vol_delta_dict" not in st.session_state:
                 st.session_state["avg_vol_delta_dict"] = {}
                 logger.info("Initialized 'avg_vol_delta_dict' in session state.")
-            process_volume_delta(tickers_list, st.session_state["last_volume_dict"], st.session_state["avg_vol_delta_dict"])
+            process_volume_delta(all_results, st.session_state["last_volume_dict"], st.session_state["avg_vol_delta_dict"])
             volumes = [
-                t.get("quoteVolume") for t in tickers_list if t and t.get("quoteVolume") is not None and t.get("quoteVolume") > 0
+                t.get("quoteVolume") for t in all_results if t and t.get("quoteVolume") is not None and t.get("quoteVolume") > 0
             ]
             vol_scale = float(np.median(volumes)) if volumes else 1.0
             vol_scale = max(vol_scale, 1.0)
             logger.info(f"Volume Scale (Median Quote Vol) calculated: {vol_scale:.2f}")
 
             # --- 6. Normalize Indicators ---
-            status_text.info("Normalizing indicators (incl. Breakout, MR Wings)...")  # Update text
+            status_text.info("Normalizing indicators...")
             progress_bar.progress(80)
-            normalize_indicator_values(tickers_list, "change_1m")
-            normalize_indicator_values(tickers_list, "change_5m")
-            normalize_indicator_values(tickers_list, "change_15m")
-            normalize_indicator_values(tickers_list, "breakout_15m")
-            normalize_indicator_values(tickers_list, "mr_wings_15m")  # NORMALIZE MR WINGS
-            normalize_indicator_values(tickers_list, "volatility_5m")
-            normalize_indicator_values(tickers_list, "vol_delta")
+            normalize_indicator_values(all_results, "change_1m")
+            normalize_indicator_values(all_results, "change_5m")
+            normalize_indicator_values(all_results, "change_15m")
+            normalize_indicator_values(all_results, "breakout_15m")
+            normalize_indicator_values(all_results, "mr_wings_15m")
+            normalize_indicator_values(all_results, "volatility_5m")
+            normalize_indicator_values(all_results, "vol_delta")
 
             # --- 7. Scoring ---
             status_text.info("Calculating final scores...")
@@ -1251,21 +1224,17 @@ async def async_dashboard_main(num_cores):
             scoring_start = time.time()
             drive_candidates = [0.5 * i for i in range(1, 11)]
             base_rank_field = "change_15m"
-            base_rank_label = "15m %"  # Use 15m change as base
-            beta = calibrate_ranking_beta(tickers_list, perc_field=base_rank_field)
-            drive = calibrate_drive(tickers_list, beta, drive_candidates, perc_field=base_rank_field)
-            # compute_scores now uses normalized_mr_wings_15m
-            final_tickers = compute_scores(copy.deepcopy(tickers_list), beta, drive, vol_scale, base_rank_field=base_rank_field)
+            base_rank_label = "15m %"
+            beta = calibrate_ranking_beta(all_results, perc_field=base_rank_field)
+            drive = calibrate_drive(all_results, beta, drive_candidates, perc_field=base_rank_field)
+            final_tickers = compute_scores(copy.deepcopy(all_results), beta, drive, vol_scale, base_rank_field=base_rank_field)
             logger.info(f"Scoring complete ({time.time() - scoring_start:.2f}s). Found {len(final_tickers)} scored tickers.")
             progress_bar.progress(95)
 
             # --- 8. Display Results ---
             status_text.info("📊 Preparing display...")
-            st.subheader(
-                f"{exchange_id.capitalize()} USDT/USD Rankings (Short-Term Focus, Base: {base_rank_label})"
-            )  # Update title
+            st.subheader(f"Multi-Exchange USDT/USD Rankings (Short-Term Focus, Base: {base_rank_label})")
             if final_tickers:
-                # create_table now includes MR Wings column
                 results_df = create_table(final_tickers, base_rank_field, base_rank_label)
                 st.dataframe(results_df, use_container_width=True)
                 logger.info("Top 5 Results:\n" + results_df.head().to_string())
@@ -1275,48 +1244,20 @@ async def async_dashboard_main(num_cores):
             progress_bar.progress(100)
             execution_time = time.time() - start_run_time
             status_text.success(
-                f"✅ Dashboard updated successfully ({execution_time:.2f}s). Displaying {len(final_tickers)} symbols."
+                f"✅ Dashboard updated successfully ({execution_time:.2f}s). Displaying {len(final_tickers)} symbols across {len(selected_exchanges)} exchanges."
             )
             st.caption(f"Last update: {pd.Timestamp.now(tz='UTC'):%Y-%m-%d %H:%M:%S %Z}")
             logger.info(f"--- Dashboard Update Complete ({execution_time:.2f}s) ---")
-
-        # --- Exception Handlers (Keep as is) ---
-        except ccxt.RateLimitExceeded as e:
-            logger.error(f"CCXT Rate Limit: {e}", exc_info=True)
-            status_text.error(f"❌ Rate limit exceeded. Wait & refresh. Error: {e}")
-        except ccxt.AuthenticationError as e:
-            logger.error(f"Authentication Error: {e}", exc_info=True)
-            status_text.error(f"❌ Authentication Failed. Check API keys if used. Error: {e}")
-        except ccxt.ExchangeNotAvailable as e:
-            logger.error(f"Exchange Not Available: {e}", exc_info=True)
-            status_text.error(f"❌ Exchange ({exchange_id.capitalize()}) unavailable. Error: {e}")
-        except ccxt.NetworkError as e:
-            logger.error(f"Network Error: {e}", exc_info=True)
-            status_text.error(f"❌ Network error connecting to {exchange_id.capitalize()}. Check connection. Error: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error in main dashboard loop: {e}", exc_info=True)
-            status_text.error(f"❌ Unexpected error: {e}")
-            st.exception(e)
-        finally:
-            if exchange:
-                try:
-                    await exchange.close()
-                    logger.info(f"Closed {exchange_id.capitalize()} exchange connection.")
-                except Exception as e:
-                    logger.error(f"Error closing {exchange_id.capitalize()} connection: {e}")
-            try:
-                progress_bar.progress(100)  # Ensure progress bar completes
-            except Exception:
-                pass  # Ignore if already removed
-
+        else:
+            status_text.error("❌ No data available from any selected exchange.")
+            progress_bar.progress(100)
 
 # =============================================================================
-# Streamlit UI Control and Async Runner (Keep as is)
+# Streamlit UI Control and Async Runner
 # =============================================================================
-def run_async_dashboard():
+def run_async_dashboard(selected_exchanges):
     """Manages the asyncio event loop and runs the main dashboard function."""
-    # (Function definition remains the same as provided in your code)
-    logger.info("run_async_dashboard called.")
+    logger.info(f"run_async_dashboard called with exchanges: {selected_exchanges}")
     try:
         try:
             loop = asyncio.get_event_loop_policy().get_event_loop()
@@ -1332,31 +1273,54 @@ def run_async_dashboard():
         num_threads_to_use = DEFAULT_NUM_THREADS
         if not loop.is_running():
             logger.info("Event loop not running. Running until complete.")
-            loop.run_until_complete(async_dashboard_main(num_threads_to_use))
+            loop.run_until_complete(async_dashboard_main(selected_exchanges, num_threads_to_use))
         else:
             logger.info("Event loop running. Creating task.")
-            loop.create_task(
-                async_dashboard_main(num_threads_to_use)
-            )  # Should ideally use asyncio.run_coroutine_threadsafe if interacting with running loop from another thread
+            loop.create_task(async_dashboard_main(selected_exchanges, num_threads_to_use))
     except Exception as e:
         logger.error(f"Error in run_async_dashboard: {e}", exc_info=True)
         st.error(f"Critical error running dashboard logic: {e}")
 
-
-# --- Sidebar Controls (Keep as is) ---
+# --- Sidebar Controls ---
 st.sidebar.markdown("---")
 st.sidebar.header("Dashboard Controls")
+
+# Initialize session state for tracking calculations
+if "calculations_running" not in st.session_state:
+    st.session_state.calculations_running = False
+if "last_selected_exchanges" not in st.session_state:
+    st.session_state.last_selected_exchanges = []
+
+# Add exchange selection
+selected_exchanges = st.sidebar.multiselect(
+    "Select Exchanges",
+    options=list(SUPPORTED_EXCHANGES.keys()),
+    format_func=lambda x: SUPPORTED_EXCHANGES[x],
+    default=["kraken"],
+    help="Select one or more exchanges to fetch data from"
+)
+
+# Check if exchanges have changed
+if selected_exchanges != st.session_state.last_selected_exchanges:
+    if st.session_state.calculations_running:
+        st.sidebar.warning("⚠️ Exchange selection changed. Please click 'Start Calculations' to update.")
+    st.session_state.last_selected_exchanges = selected_exchanges
+    st.session_state.calculations_running = False
+
 st.sidebar.info(f"Using up to {DEFAULT_NUM_THREADS} threads for fetching.")
-if st.sidebar.button("🔄 Refresh Data", key="refresh_data_button", help="Click to manually fetch the latest data."):
-    st.sidebar.info("Manual refresh initiated...")
-    logger.info("Manual refresh button clicked.")
+
+# Add start button
+if st.sidebar.button("🚀 Start Calculations", key="start_calculations_button", help="Click to start fetching and analyzing data from selected exchanges."):
+    st.sidebar.info("Starting calculations...")
+    logger.info(f"Start calculations button clicked for exchanges: {selected_exchanges}")
+    st.session_state.calculations_running = True
     st.session_state.pop("last_volume_dict", None)
     st.session_state.pop("avg_vol_delta_dict", None)
     logger.info("Cleared volume tracking state for refresh.")
-    st.rerun()
+    run_async_dashboard(selected_exchanges)
 
 # =============================================================================
-# Script Entry Point Guard (Keep as is)
+# Script Entry Point Guard
 # =============================================================================
 if __name__ == "__main__":
     logger.info("Script execution started (__name__ == '__main__').")
@@ -1377,10 +1341,7 @@ if __name__ == "__main__":
         logger.error(f"Failed to set multiprocessing start method: {e}", exc_info=True)
         st.error(f"Error setting up multiprocessing: {e}. App might not function correctly.")
 
-    # --- Run Dashboard if Authenticated ---
-    # if st.session_state.get("authenticated", False):
-    #     logger.info("User is authenticated. Starting dashboard execution...")
-    run_async_dashboard()
-    # else:
-    #     logger.info("User is not authenticated. Waiting for login in sidebar.")
-        # Login UI is handled earlier in the script, st.stop() prevents running
+    # Display initial message if no calculations have been run
+    if not st.session_state.calculations_running:
+        st.info("👋 Welcome! Please select exchanges and click 'Start Calculations' to begin.")
+        st.stop()  # Stop execution until user clicks start
